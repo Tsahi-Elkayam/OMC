@@ -1,0 +1,22 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kibana-dashboard-init-job
+  namespace: elastic-network
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      containers:
+      - name: kibana-init
+        image: curlimages/curl:latest
+        command: ["/bin/sh", "/scripts/init-dashboard.sh"]
+        volumeMounts:
+        - name: init-script
+          mountPath: /scripts
+      restartPolicy: OnFailure
+      volumes:
+      - name: init-script
+        configMap:
+          name: kibana-dashboard-init
+          defaultMode: 0755

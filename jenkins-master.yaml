@@ -1,0 +1,214 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jenkins
+  namespace: jenkins-network
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jenkins
+  template:
+    metadata:
+      labels:
+        app: jenkins
+    spec:
+      serviceAccountName: jenkins
+      containers:
+      - name: jenkins
+        image: jenkins/jenkins:lts-jdk17
+        env:
+        - name: JAVA_OPTS
+          value: -Djenkins.install.runSetupWizard=false
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                # Wait until Jenkins is fully up
+                echo "Waiting for Jenkins to start..."
+                until curl -s -f http://localhost:8080/login > /dev/null; do
+                  sleep 5
+                done
+
+                # Wait for plugins to initialize
+                echo "Jenkins is up, waiting for plugins to initialize..."
+                sleep 30
+
+                # Configure Logstash using your working script
+                echo "Configuring Logstash plugin..."
+                LOGSTASH_SCRIPT=$(cat <<'EOF'
+                import jenkins.model.*
+                import jenkins.plugins.logstash.*
+                import jenkins.plugins.logstash.configuration.*
+                import java.net.URI
+                import java.net.InetSocketAddress
+
+                // Wait to ensure plugins are loaded
+                Thread.sleep(5000)
+
+                try {
+                    def jenkins = Jenkins.getInstance()
+
+                    // Get LogstashConfiguration descriptor
+                    def descriptor = null
+                    try {
+                        descriptor = jenkins.getDescriptorByType(LogstashConfiguration.class)
+                    } catch (Exception e) {
+                        // Try alternative approach if first method fails
+                        def extensionList = jenkins.getExtensionList(LogstashConfiguration.class)
+                        if (!extensionList.isEmpty()) {
+                            descriptor = extensionList.get(0)
+                        }
+                    }
+
+                    if (descriptor == null) {
+                        return "ERROR: Could not find LogstashConfiguration descriptor"
+                    }
+
+                    // Define Logstash connection details
+                    def logstashHost = "logstash.logstash-network.svc.cluster.local"
+                    def logstashPort = 5045
+
+                    // Create and configure the indexer
+                    def plugin = jenkins.pluginManager.getPlugin("logstash")
+                    def indexer = Class.forName("jenkins.plugins.logstash.configuration.ElasticSearch",
+                                               true, plugin.classLoader).newInstance()
+
+                    // Create URI and set properties
+                    def uri = new URI("http", null, logstashHost, logstashPort, null, null, null)
+                    indexer.setUri(uri)
+                    indexer.setMimeType("application/json")
+
+                    // Configure Logstash
+                    descriptor.setLogstashIndexer(indexer)
+                    descriptor.setEnabled(true)
+
+                    // Set additional configurations if available
+                    try { descriptor.setEnableGlobally(true) } catch (Exception e) {}
+                    try { descriptor.setMilliSecondTimestamps(true) } catch (Exception e) {}
+
+                    // Save configuration
+                    descriptor.save()
+                    jenkins.save()
+
+                    return "Logstash configuration successful"
+                } catch (Exception e) {
+                    return "ERROR: " + e.message
+                }
+                EOF
+                )
+
+                # Try configuring Logstash multiple times in case of timing issues
+                MAX_ATTEMPTS=5
+                ATTEMPT=0
+                SUCCESS=false
+
+                while [ $ATTEMPT -lt $MAX_ATTEMPTS ] && [ "$SUCCESS" = "false" ]; do
+                  ATTEMPT=$((ATTEMPT+1))
+                  echo "Attempt $ATTEMPT of $MAX_ATTEMPTS to configure Logstash..."
+
+                  RESULT=$(curl -s -X POST -u admin:admin123 --data-urlencode "script=$LOGSTASH_SCRIPT" http://localhost:8080/scriptText)
+
+                  if [[ "$RESULT" == *"Logstash configuration successful"* ]]; then
+                    echo "✅ Logstash configured successfully!"
+                    SUCCESS=true
+                  else
+                    echo "⚠️ Configuration attempt failed: $RESULT"
+                    echo "Waiting before retry..."
+                    sleep 20
+                  fi
+                done
+
+                if [ "$SUCCESS" = "false" ]; then
+                  echo "❌ Failed to configure Logstash after $MAX_ATTEMPTS attempts"
+                fi
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Install plugins
+          echo "Installing plugins..."
+          jenkins-plugin-cli --plugins kubernetes:latest workflow-aggregator:latest git:latest pipeline-stage-view:latest logstash:latest timestamper:latest
+          # Start Jenkins
+          echo "Starting Jenkins..."
+          /usr/local/bin/jenkins.sh
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 50000
+          name: jnlp
+        volumeMounts:
+        - name: jenkins-home
+          mountPath: /var/jenkins_home
+        - name: jenkins-init-config
+          mountPath: /usr/share/jenkins/ref/init.groovy.d/
+      volumes:
+      - name: jenkins-home
+        emptyDir: {}
+      - name: jenkins-init-config
+        configMap:
+          name: jenkins-init-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jenkins
+  namespace: jenkins-network
+  labels:
+    app: jenkins
+spec:
+  type: NodePort
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  - port: 50000
+    targetPort: 50000
+    name: jnlp
+  selector:
+    app: jenkins
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins
+  namespace: jenkins-network
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins
+  namespace: jenkins-network
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create","delete","get","list","patch","update","watch"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create","delete","get","list","patch","update","watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get","list","watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get","list","watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins
+  namespace: jenkins-network
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: jenkins
+subjects:
+- kind: ServiceAccount
+  name: jenkins
+  namespace: jenkins-network

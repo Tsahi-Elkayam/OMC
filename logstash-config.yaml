@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: logstash-network
+data:
+  logstash.conf: |
+    input {
+      # Keep the Beats input to maintain compatibility
+      beats {
+        port => 5044
+      }
+
+      # Separate TCP input on a different port for Jenkins
+      tcp {
+        port => 5045
+        codec => json
+      }
+    }
+
+    filter {
+      # Process Jenkins logs from any source
+      if [type] == "jenkins" or [source] =~ /jenkins/ or [kubernetes][container][name] =~ /jenkins/ {
+        mutate {
+          add_field => { "[@metadata][index]" => "jenkins-logs-%{+YYYY.MM.dd}" }
+        }
+
+        # Try to extract log level and timestamp if available
+        grok {
+          match => { "message" => "%{TIMESTAMP_ISO8601:timestamp} %{LOGLEVEL:log_level} %{GREEDYDATA:log_message}" }
+          tag_on_failure => ["_grokparsefailure"]
+          # Don't fail if parsing fails
+          break_on_match => false
+        }
+      }
+    }
+
+    output {
+      elasticsearch {
+        # Fixed connection with http:// prefix and retry parameters
+        hosts => ["http://elasticsearch.elastic-network.svc.cluster.local:9200"]
+        index => "jenkins-logs-%{+YYYY.MM.dd}"
+        # Retry for a longer period in case of temporary connection issues
+        retry_max_interval => 10
+        retry_max_items => 5000
+        retry_initial_interval => 5
+        ssl => false
+      }
+      # For debugging - uncomment to see events in logs
+      # stdout { codec => rubydebug }
+    }

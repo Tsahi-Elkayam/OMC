@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-pod-templates
+  namespace: jenkins-network
+data:
+  basic-agent-pod.yaml: |
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      labels:
+        jenkins: slave
+        jenkins-agent: basic
+    spec:
+      containers:
+      - name: jnlp
+        image: jenkins/inbound-agent:latest
+        tty: true

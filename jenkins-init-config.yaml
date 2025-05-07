@@ -1,0 +1,383 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-init-config
+  namespace: jenkins-network
+data:
+  basic-security.groovy: |
+    #!groovy
+    import jenkins.model.*
+    import hudson.security.*
+    import jenkins.install.*
+
+    def instance = Jenkins.getInstance()
+
+    // Skip setup wizard
+    instance.setInstallState(InstallState.INITIAL_SETUP_COMPLETED)
+
+    // Create admin user
+    def hudsonRealm = new HudsonPrivateSecurityRealm(false)
+    hudsonRealm.createAccount("admin", "admin123")
+    instance.setSecurityRealm(hudsonRealm)
+
+    def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
+    strategy.setAllowAnonymousRead(false)
+    instance.setAuthorizationStrategy(strategy)
+
+    instance.save()
+    println("Basic security setup completed")
+
+  kubernetes-config.groovy: |
+    #!groovy
+    import jenkins.model.*
+    import org.csanchez.jenkins.plugins.kubernetes.*
+    import org.csanchez.jenkins.plugins.kubernetes.pod.*
+    import hudson.model.*
+
+    try {
+      def jenkins = Jenkins.getInstance()
+
+      // Clear existing clouds
+      jenkins.clouds.clear()
+
+      // Configure Kubernetes plugin
+      KubernetesCloud cloud = new KubernetesCloud("kubernetes")
+
+      // Set Kubernetes details
+      cloud.setServerUrl("https://kubernetes.default.svc.cluster.local")
+      cloud.setNamespace("jenkins-network")
+      cloud.setJenkinsUrl("http://jenkins.jenkins-network.svc.cluster.local:8080")
+      cloud.setJenkinsTunnel("jenkins.jenkins-network.svc.cluster.local:50000")
+      cloud.setDirectConnection(false)
+      cloud.setRetentionTimeout(5)
+
+      // Add basic Pod Template
+      PodTemplate basicPodTemplate = new PodTemplate()
+      basicPodTemplate.setName("basic-kubernetes-agent")
+      basicPodTemplate.setNamespace("jenkins-network")
+      basicPodTemplate.setLabel("kubernetes-agent")
+
+      // Create container template for the basic agent
+      ContainerTemplate basicContainerTemplate = new ContainerTemplate("jnlp", "jenkins/inbound-agent:latest")
+      basicContainerTemplate.setCommand("")
+      basicContainerTemplate.setArgs("\${computer.jnlpmac} \${computer.name}")
+      basicContainerTemplate.setTtyEnabled(true)
+
+      basicPodTemplate.setContainers([basicContainerTemplate])
+
+      cloud.addTemplate(basicPodTemplate)
+
+      // Add build Pod Template for curl
+      PodTemplate buildPodTemplate = new PodTemplate()
+      buildPodTemplate.setName("curl-build-agent")
+      buildPodTemplate.setNamespace("jenkins-network")
+      buildPodTemplate.setLabel("curl-build-agent")
+
+      // Create container template for the build agent
+      // Using an image that has build tools pre-installed
+      ContainerTemplate buildContainerTemplate = new ContainerTemplate("jnlp", "jenkins/inbound-agent:latest")
+      buildContainerTemplate.setCommand("")
+      buildContainerTemplate.setArgs("\${computer.jnlpmac} \${computer.name}")
+      buildContainerTemplate.setTtyEnabled(true)
+      buildContainerTemplate.setRunAsUser("0")  // Run as root
+      buildContainerTemplate.setRunAsGroup("0") // Run as root group
+
+      buildPodTemplate.setContainers([buildContainerTemplate])
+
+      cloud.addTemplate(buildPodTemplate)
+
+      // Add cloud configuration to Jenkins
+      jenkins.clouds.add(cloud)
+
+      jenkins.save()
+      println("Kubernetes cloud configuration completed with pod templates")
+    } catch (Exception e) {
+      println("Error configuring Kubernetes cloud: " + e.message)
+      e.printStackTrace()
+    }
+
+  jenkins-location-config.groovy: |
+    #!groovy
+    import jenkins.model.JenkinsLocationConfiguration
+
+    println("Setting Jenkins URL...")
+    def jenkinsLocationConfiguration = JenkinsLocationConfiguration.get()
+
+    // Set proper Jenkins URL for Kubernetes environment
+    jenkinsLocationConfiguration.setUrl("http://jenkins.jenkins-network.svc.cluster.local:8080/")
+
+    // Set admin email
+    jenkinsLocationConfiguration.setAdminAddress("admin@example.com")
+
+    jenkinsLocationConfiguration.save()
+    println("Jenkins URL configuration completed")
+
+  logstash-config.groovy: |
+    #!groovy
+    import jenkins.model.*
+    import java.net.Socket
+    import java.net.InetSocketAddress
+    import java.net.URI
+
+    // Wait for Jenkins to fully initialize (allowing plugins to load)
+    Thread.sleep(10000)
+    println("Starting Logstash configuration...")
+
+    def jenkins = Jenkins.getInstance()
+    println("Jenkins instance: ${jenkins}")
+
+    // Ensure the plugin class is loaded
+    try {
+        // Try to load the LogstashConfiguration class from the plugin
+        def logstashConfigClass = jenkins.pluginManager.uberClassLoader.loadClass("jenkins.plugins.logstash.LogstashConfiguration")
+        def elasticSearchClass = jenkins.pluginManager.uberClassLoader.loadClass("jenkins.plugins.logstash.configuration.ElasticSearch")
+
+        println("Successfully loaded Logstash plugin classes.")
+
+        // Attempt to get LogstashConfiguration instance
+        def descriptor = null
+        def extensionList = jenkins.getExtensionList(logstashConfigClass)
+
+        if (!extensionList.isEmpty()) {
+            descriptor = extensionList.get(0)
+            println("Found LogstashConfiguration: ${descriptor}")
+        } else {
+            println("ERROR: Could not find LogstashConfiguration instance")
+            return
+        }
+
+        // Define Logstash connection details
+        def logstashHost = "logstash.logstash-network.svc.cluster.local"
+        def logstashPort = 5045
+
+        // Test connection to Logstash
+        println("\nTesting connection to Logstash at ${logstashHost}:${logstashPort}...")
+        def socket = new Socket()
+        def connectionSuccessful = false
+
+        try {
+            socket.connect(new InetSocketAddress(logstashHost, logstashPort), 5000)
+            println("SUCCESS: Connection to Logstash server successful")
+            connectionSuccessful = true
+        } catch (Exception ex) {
+            println("WARNING: Failed to connect to Logstash server: ${ex.message}")
+            println("Will continue with configuration - service might not be ready yet")
+            connectionSuccessful = true  // Continue anyway
+        } finally {
+            try { socket.close() } catch (Exception ignored) {}
+        }
+
+        if (connectionSuccessful) {
+            // Create a new ElasticSearch indexer
+            println("\nConfiguring Logstash indexer...")
+            def indexer = elasticSearchClass.newInstance()
+
+            // Create URI
+            def uri = new URI("http", null, logstashHost, logstashPort, null, null, null)
+            println("Created URI: ${uri}")
+
+            // Use reflection to safely set properties
+            try {
+                indexer.setUri(uri)
+                println("Set URI successfully")
+            } catch (Exception e) {
+                println("Error setting URI: ${e.message}")
+                // Try string version as fallback
+                try {
+                    indexer.setUri(uri.toString())
+                    println("Set URI using string format")
+                } catch (Exception e2) {
+                    println("Failed to set URI: ${e2.message}")
+                }
+            }
+
+            try {
+                indexer.setMimeType("application/json")
+                println("Set MIME type to application/json")
+            } catch (Exception e) {
+                println("Error setting MIME type: ${e.message}")
+            }
+
+            // Set the indexer in the configuration
+            try {
+                descriptor.setLogstashIndexer(indexer)
+                println("Set logstash indexer")
+            } catch (Exception e) {
+                println("Error setting indexer: ${e.message}")
+            }
+
+            // Enable Logstash
+            try {
+                descriptor.setEnabled(true)
+                println("Enabled Logstash")
+            } catch (Exception e) {
+                println("Error enabling Logstash: ${e.message}")
+            }
+
+            // Try setting additional configuration if methods exist
+            try {
+                descriptor.setEnableGlobally(true)
+                println("Enabled Logstash globally")
+            } catch (Exception e) {
+                println("Note: Could not enable globally - method may not exist")
+            }
+
+            try {
+                descriptor.setMilliSecondTimestamps(true)
+                println("Enabled millisecond timestamps")
+            } catch (Exception e) {
+                println("Note: Could not set millisecond timestamps - method may not exist")
+            }
+
+            // Save configuration
+            println("\nSaving Logstash configuration...")
+            try {
+                descriptor.save()
+                jenkins.save()
+                println("Configuration saved successfully")
+            } catch (Exception e) {
+                println("ERROR saving configuration: ${e.message}")
+            }
+
+            println("\nLogstash configuration completed")
+        }
+    } catch (ClassNotFoundException e) {
+        println("ERROR: Logstash plugin classes not found: ${e.message}")
+        println("Plugin may not be installed correctly or not fully loaded yet.")
+    } catch (Exception e) {
+        println("ERROR during Logstash configuration: ${e.message}")
+        e.printStackTrace()
+    }
+
+  create-curl-job.groovy: |
+    #!groovy
+    import jenkins.model.*
+    import org.jenkinsci.plugins.workflow.job.WorkflowJob
+    import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
+
+    try {
+      println("Starting create-curl-job script")
+      def jenkins = Jenkins.getInstance()
+      def jobName = "curl-build"
+
+      // Define the pipeline script with Logstash enabled
+      def pipelineScript = '''
+      pipeline {
+          agent {
+              label 'curl-build-agent'
+          }
+
+          // Explicitly enable timestamps and logstash for better logging
+          options {
+              timestamps()
+              logstash {
+                  useCustomSendQueue true
+                  maxQueueSize 500
+              }
+          }
+
+          stages {
+              stage('Install Dependencies') {
+                  steps {
+                      retry(3) {
+                          sh "apt-get clean"
+                          sh "rm -rf /var/lib/apt/lists/*"
+                          sh "apt-get update"
+                      }
+                      sh "apt-get install -y autoconf libtool make gcc libssl-dev libpsl-dev"
+                  }
+              }
+
+              stage('Clone') {
+                  steps {
+                      git 'https://github.com/curl/curl.git'
+                  }
+              }
+
+              stage('Build') {
+                  steps {
+                      sh "autoreconf -fi"
+                      sh "sh ./configure --with-openssl"
+                      sh "make"
+                  }
+              }
+
+              stage('Test') {
+                  steps {
+                      catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                          sh "make test"
+                      }
+                  }
+              }
+
+              stage('Archive') {
+                  steps {
+                      archiveArtifacts artifacts: 'src/curl', fingerprint: true
+                  }
+              }
+          }
+      }
+      '''
+
+      // Create the job
+      println("Creating pipeline job: " + jobName)
+      WorkflowJob job = jenkins.createProject(WorkflowJob.class, jobName)
+      job.setDefinition(new CpsFlowDefinition(pipelineScript, true))
+      job.save()
+      println("Pipeline job created successfully")
+    } catch (Exception e) {
+      println("Error creating/updating pipeline job: " + e.message)
+      e.printStackTrace()
+    }
+
+  test-kubernetes-job.groovy: |
+    #!groovy
+    import jenkins.model.*
+    import org.jenkinsci.plugins.workflow.job.WorkflowJob
+    import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
+
+    try {
+      def jenkins = Jenkins.getInstance()
+      def jobName = "kubernetes-test"
+
+      // Only create the job if it doesn't exist
+      if (jenkins.getItemByFullName(jobName) == null) {
+        println("Creating kubernetes test job: " + jobName)
+
+        def pipelineScript = '''
+        pipeline {
+            agent {
+                label 'kubernetes-agent'
+            }
+
+            options {
+                timestamps()
+                logstash {
+                    useCustomSendQueue true
+                    maxQueueSize 500
+                }
+            }
+
+            stages {
+                stage('Test') {
+                    steps {
+                        sh "hostname"
+                        sh "echo Running on Kubernetes agent"
+                    }
+                }
+            }
+        }
+        '''
+
+        WorkflowJob job = jenkins.createProject(WorkflowJob.class, jobName)
+        job.setDefinition(new CpsFlowDefinition(pipelineScript, true))
+        job.save()
+
+        println("Kubernetes test job created successfully")
+      } else {
+        println("Job already exists: " + jobName)
+      }
+    } catch (Exception e) {
+      println("Error creating kubernetes test job: " + e.message)
+      e.printStackTrace()
+    }

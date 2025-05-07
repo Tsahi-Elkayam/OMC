@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kibana-dashboard-init
+  namespace: elastic-network
+data:
+  init-dashboard.sh: |
+    #!/bin/sh
+
+    # Simple check until Kibana is accessible
+    echo "Waiting for Kibana..."
+    MAX_ATTEMPTS=30
+    ATTEMPT=0
+
+    while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+      ATTEMPT=$((ATTEMPT+1))
+      echo "Attempt $ATTEMPT of $MAX_ATTEMPTS..."
+
+      if curl -s --connect-timeout 5 http://kibana:5601/app/home > /dev/null; then
+        echo "Kibana is reachable!"
+        break
+      fi
+
+      if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+        echo "Kibana not ready after $MAX_ATTEMPTS attempts, proceeding anyway..."
+      else
+        echo "Kibana not ready yet, waiting 10 seconds..."
+        sleep 10
+      fi
+    done
+
+    echo "Waiting 30 more seconds to ensure Kibana API is fully ready..."
+    sleep 30
+
+    # Create index pattern
+    echo "Creating index pattern..."
+    curl -X POST "http://kibana:5601/api/saved_objects/index-pattern/jenkins-logs" \
+      -H 'kbn-xsrf: true' \
+      -H 'Content-Type: application/json' \
+      -d '{
+        "attributes": {
+          "title": "jenkins-logs-*",
+          "timeFieldName": "@timestamp"
+        }
+      }'
+
+    # Create log level visualization
+    echo "Creating log level visualization..."
+    curl -X POST "http://kibana:5601/api/saved_objects/visualization/jenkins-log-levels" \
+      -H 'kbn-xsrf: true' \
+      -H 'Content-Type: application/json' \
+      -d '{
+        "attributes": {
+          "title": "Jenkins Log Levels",
+          "visState": "{\"title\":\"Jenkins Log Levels\",\"type\":\"pie\",\"params\":{\"addLegend\":true,\"addTooltip\":true,\"isDonut\":false,\"legendPosition\":\"right\",\"type\":\"pie\"},\"aggs\":[{\"id\":\"1\",\"enabled\":true,\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"enabled\":true,\"type\":\"terms\",\"schema\":\"segment\",\"params\":{\"field\":\"log_level.keyword\",\"size\":10}}]}",
+          "uiStateJSON": "{}",
+          "description": "",
+          "kibanaSavedObjectMeta": {
+            "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"indexRefName\":\"kibanaSavedObjectMeta.searchSourceJSON.index\",\"filter\":[]}"
+          }
+        },
+        "references": [
+          {
+            "name": "kibanaSavedObjectMeta.searchSourceJSON.index",
+            "type": "index-pattern",
+            "id": "jenkins-logs"
+          }
+        ]
+      }'
+
+    # Create simple dashboard
+    echo "Creating dashboard..."
+    curl -X POST "http://kibana:5601/api/saved_objects/dashboard/jenkins-logs-dashboard" \
+      -H 'kbn-xsrf: true' \
+      -H 'Content-Type: application/json' \
+      -d '{
+        "attributes": {
+          "title": "Jenkins Logs Dashboard",
+          "hits": 0,
+          "description": "Dashboard for Jenkins logs monitoring",
+          "panelsJSON": "[{\"gridData\":{\"x\":0,\"y\":0,\"w\":48,\"h\":20,\"i\":\"1\"},\"version\":\"7.17.10\",\"panelIndex\":\"1\",\"embeddableConfig\":{\"title\":\"Log Levels\"},\"panelRefName\":\"panel_0\"}]",
+          "optionsJSON": "{\"hidePanelTitles\":false,\"useMargins\":true}",
+          "timeRestore": false,
+          "kibanaSavedObjectMeta": {
+            "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[]}"
+          }
+        },
+        "references": [
+          {
+            "name": "panel_0",
+            "type": "visualization",
+            "id": "jenkins-log-levels"
+          }
+        ]
+      }'
+
+    echo "Dashboard setup completed successfully!"

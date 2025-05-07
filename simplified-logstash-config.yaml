@@ -1,0 +1,24 @@
+﻿apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: logstash-network
+data:
+  logstash.conf: |
+    input {
+      beats {
+        port => 5044
+      }
+      
+      tcp {
+        port => 5045
+        codec => json
+      }
+    }
+    
+    output {
+      elasticsearch {
+        hosts => ["elasticsearch.elastic-network.svc.cluster.local:9200"]
+        index => "jenkins-logs-%{+YYYY.MM.dd}"
+      }
+    }

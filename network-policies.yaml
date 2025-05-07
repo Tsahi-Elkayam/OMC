@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: logstash-network
+spec:
+  selector:
+    app: logstash
+  ports:
+  - name: beats
+    port: 5044
+    targetPort: 5044
+  - name: jenkins
+    port: 5045
+    targetPort: 5045
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: elastic-access
+  namespace: elastic-network
+spec:
+  podSelector:
+    matchLabels:
+      app: elasticsearch
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: logstash-network
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logstash-access
+  namespace: logstash-network
+spec:
+  podSelector:
+    matchLabels:
+      app: logstash
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: jenkins-network
+    ports:
+    - port: 5044
+      protocol: TCP
+    - port: 5045
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jenkins-slave-access
+  namespace: jenkins-network
+spec:
+  podSelector:
+    matchLabels:
+      app: jenkins-slave
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: jenkins
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jenkins-to-elastic
+  namespace: elastic-network
+spec:
+  podSelector:
+    matchLabels:
+      app: elasticsearch
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: jenkins-network

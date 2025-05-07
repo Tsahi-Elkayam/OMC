@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jenkins-network
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: elastic-network
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logstash-network
