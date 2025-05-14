@@ -118,6 +118,8 @@ data:
     import java.net.Socket
     import java.net.InetSocketAddress
     import java.net.URI
+    import java.net.URL
+    import java.net.HttpURLConnection
 
     // Wait for Jenkins to fully initialize (allowing plugins to load)
     Thread.sleep(10000)
@@ -152,19 +154,20 @@ data:
 
         // Test connection to Logstash
         println("\nTesting connection to Logstash at ${logstashHost}:${logstashPort}...")
-        def socket = new Socket()
         def connectionSuccessful = false
 
         try {
-            socket.connect(new InetSocketAddress(logstashHost, logstashPort), 5000)
+            // Using HTTP for connection test
+            def url = new URL("http://${logstashHost}:${logstashPort}")
+            def connection = url.openConnection()
+            connection.setConnectTimeout(5000)
+            connection.connect()
             println("SUCCESS: Connection to Logstash server successful")
             connectionSuccessful = true
         } catch (Exception ex) {
             println("WARNING: Failed to connect to Logstash server: ${ex.message}")
             println("Will continue with configuration - service might not be ready yet")
             connectionSuccessful = true  // Continue anyway
-        } finally {
-            try { socket.close() } catch (Exception ignored) {}
         }
 
         if (connectionSuccessful) {
@@ -270,10 +273,7 @@ data:
           // Explicitly enable timestamps and logstash for better logging
           options {
               timestamps()
-              logstash {
-                  useCustomSendQueue true
-                  maxQueueSize 500
-              }
+              logstash()
           }
 
           stages {
@@ -327,57 +327,5 @@ data:
       println("Pipeline job created successfully")
     } catch (Exception e) {
       println("Error creating/updating pipeline job: " + e.message)
-      e.printStackTrace()
-    }
-
-  test-kubernetes-job.groovy: |
-    #!groovy
-    import jenkins.model.*
-    import org.jenkinsci.plugins.workflow.job.WorkflowJob
-    import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition
-
-    try {
-      def jenkins = Jenkins.getInstance()
-      def jobName = "kubernetes-test"
-
-      // Only create the job if it doesn't exist
-      if (jenkins.getItemByFullName(jobName) == null) {
-        println("Creating kubernetes test job: " + jobName)
-
-        def pipelineScript = '''
-        pipeline {
-            agent {
-                label 'kubernetes-agent'
-            }
-
-            options {
-                timestamps()
-                logstash {
-                    useCustomSendQueue true
-                    maxQueueSize 500
-                }
-            }
-
-            stages {
-                stage('Test') {
-                    steps {
-                        sh "hostname"
-                        sh "echo Running on Kubernetes agent"
-                    }
-                }
-            }
-        }
-        '''
-
-        WorkflowJob job = jenkins.createProject(WorkflowJob.class, jobName)
-        job.setDefinition(new CpsFlowDefinition(pipelineScript, true))
-        job.save()
-
-        println("Kubernetes test job created successfully")
-      } else {
-        println("Job already exists: " + jobName)
-      }
-    } catch (Exception e) {
-      println("Error creating kubernetes test job: " + e.message)
       e.printStackTrace()
     }

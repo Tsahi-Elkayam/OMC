@@ -11,10 +11,16 @@ data:
         port => 5044
       }
 
-      # Separate TCP input on a different port for Jenkins
+      # TCP input for direct JSON data
       tcp {
-        port => 5045
-        codec => json
+        port => 5046
+        codec => json_lines
+      }
+
+      # HTTP input for Jenkins plugin
+      http {
+        port => "5045"
+        codec => "json"
       }
     }
 
@@ -42,10 +48,9 @@ data:
         index => "jenkins-logs-%{+YYYY.MM.dd}"
         # Retry for a longer period in case of temporary connection issues
         retry_max_interval => 10
-        retry_max_items => 5000
         retry_initial_interval => 5
         ssl => false
       }
-      # For debugging - uncomment to see events in logs
-      # stdout { codec => rubydebug }
+      # For debugging - output to console
+      stdout { codec => rubydebug }
     }
